@@ -3,23 +3,18 @@ package edu.ksu.canvas.net;
 import edu.ksu.canvas.exception.InvalidOauthTokenException;
 import edu.ksu.canvas.exception.UnauthorizedException;
 import edu.ksu.canvas.oauth.OauthToken;
-
-import org.apache.http.Header;
-import org.apache.http.HttpEntity;
-import org.apache.http.HttpHeaders;
-import org.apache.http.HttpResponse;
-import org.apache.http.NameValuePair;
+import org.apache.http.*;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
-import org.apache.http.client.methods.HttpEntityEnclosingRequestBase;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.client.methods.HttpPost;
-import org.apache.http.client.methods.HttpPut;
-import org.apache.http.client.methods.HttpRequestBase;
+import org.apache.http.client.methods.*;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.BasicResponseHandler;
+import org.apache.http.impl.client.CloseableHttpClient;
 import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.message.BasicNameValuePair;
 import org.apache.http.params.CoreConnectionPNames;
 import org.apache.http.params.HttpParams;
@@ -27,7 +22,6 @@ import org.apache.http.util.EntityUtils;
 import org.apache.log4j.Logger;
 
 import javax.validation.constraints.NotNull;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -46,39 +40,46 @@ public class SimpleRestClient implements RestClient {
         LOG.debug("Sending GET request to URL: " + url);
         Long beginTime = System.currentTimeMillis();
         Response response = new Response();
-        HttpClient httpClient = createHttpClient(connectTimeout, readTimeout);
+        CloseableHttpClient httpClient = createPooledHttpClient(connectTimeout, readTimeout);
         HttpGet httpGet = new HttpGet(url);
         httpGet.setHeader("Authorization", "Bearer" + " " + token.getAccessToken());
+        CloseableHttpResponse httpResponse = httpClient.execute(httpGet);
 
-        HttpResponse httpResponse = httpClient.execute(httpGet);
-        checkAuthenticationHeaders(httpResponse);
+        try {
+            checkAuthenticationHeaders(httpResponse);
 
-        //deal with the actual content
-        BufferedReader in = new BufferedReader(new InputStreamReader(httpResponse.getEntity().getContent()));
-        String inputLine;
-        StringBuffer content = new StringBuffer();
-        while ((inputLine = in.readLine()) != null) {
-            content.append(inputLine);
-        }
-        response.setContent(content.toString());
-        response.setResponseCode(httpResponse.getStatusLine().getStatusCode());
-        Long endTime = System.currentTimeMillis();
-        LOG.debug("GET call took: " + (endTime - beginTime) + "ms");
+            //deal with the actual content
+            BufferedReader in = new BufferedReader(new InputStreamReader(httpResponse.getEntity().getContent()));
+            String inputLine;
+            StringBuffer content = new StringBuffer();
+            while ((inputLine = in.readLine()) != null) {
+                content.append(inputLine);
+            }
+            response.setContent(content.toString());
+            response.setResponseCode(httpResponse.getStatusLine().getStatusCode());
+            Long endTime = System.currentTimeMillis();
+            LOG.debug("GET call took: " + (endTime - beginTime) + "ms");
 
-        //deal with pagination
-        Header linkHeader = httpResponse.getFirstHeader("Link");
-        String linkHeaderValue = linkHeader == null ? null : httpResponse.getFirstHeader("Link").getValue();
-        if(linkHeaderValue == null) {
-            return response;
-        }
-        List<String> links = Arrays.asList(linkHeaderValue.split(","));
-        for (String link : links) {
-            if(link.contains("rel=\"next\"")) {
-                LOG.debug("response has more pages");
-                String nextLink = link.substring(1, link.indexOf(';')-1); //format is <http://.....>; rel="next"
-                response.setNextLink(nextLink);
+            //deal with pagination
+            Header linkHeader = httpResponse.getFirstHeader("Link");
+            String linkHeaderValue = linkHeader == null ? null : httpResponse.getFirstHeader("Link").getValue();
+            if (linkHeaderValue == null) {
+                return response;
+            }
+            List<String> links = Arrays.asList(linkHeaderValue.split(","));
+            for (String link : links) {
+                if (link.contains("rel=\"next\"")) {
+                    LOG.debug("response has more pages");
+                    String nextLink = link.substring(1, link.indexOf(';') - 1); //format is <http://.....>; rel="next"
+                    response.setNextLink(nextLink);
+                }
             }
         }
+        finally {
+            httpResponse.close();
+            httpClient.close();
+        }
+
         return response;
     }
 
@@ -237,6 +238,15 @@ public class SimpleRestClient implements RestClient {
         params.setParameter(CoreConnectionPNames.CONNECTION_TIMEOUT, connectTimeout);
         params.setParameter(CoreConnectionPNames.SO_TIMEOUT, readTimeout);
         return httpClient;
+    }
+
+    private CloseableHttpClient createPooledHttpClient(int connectTimeout, int readTimeout){
+        HttpClientConnectionManager poolingConnManager
+                = new PoolingHttpClientConnectionManager();
+        CloseableHttpClient client
+                = HttpClients.custom().setConnectionManager(poolingConnManager)
+                .build();
+        return client;
     }
 
     private static List<NameValuePair> convertParameters(final Map<String, List<String>> parameterMap) {
